@@ -556,6 +556,9 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
 .rec-on b { font: 700 20px/1 var(--num); color: var(--stage-ink); letter-spacing: .02em; }
 .rec-on small { font-size: 12px; font-weight: 500; color: var(--yellow); }
 .rbtn.is-rec { background: #d9382b; color: #fff; }
+/* 좁은 화면에서는 아래쪽 줄에 자리가 없어 녹화 단추를 위쪽 줄에 둔다 */
+.rec-top { flex: none; align-items: center; min-height: 34px; padding: 4px 12px; border: 1.5px solid #ff6f61; border-radius: 3px; background: transparent; color: #ff8a80; font-size: 13.5px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.rec-top.is-rec { background: #d9382b; border-color: #d9382b; color: #fff; }
 .room-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
 .room:not([data-side=""]) .room-body { grid-template-columns: minmax(0, 1fr) 360px; }
 .room-side { display: none; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid var(--stage-line); background: var(--stage-2); }
@@ -725,9 +728,14 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
   .stage.is-spot .tile:not(.is-main) { display: none; }
   .stage.is-spot .tile.is-main { grid-row: auto; }
   .cap { font-size: 16px; padding: 6px 12px; } .caps { bottom: 8px; padding: 0 8px; }
-  .room-bar { gap: 6px; padding-block: 8px; } .rb-g { gap: 4px; }
+  .room-top { gap: 10px; padding-inline: max(12px, env(safe-area-inset-left, 0px)) max(12px, env(safe-area-inset-right, 0px)); }
+  .rec-on.is-mine { display: none; }       /* 내가 녹화 중이면 위쪽 단추가 시간까지 보여 준다 */
+  /* 단추가 한 줄에 다 들어가지 않는다. 첫 줄에 마이크·카메라와 나가기, 둘째 줄에 채팅·번역·메모·자료를 둔다. */
+  .room-bar { flex-wrap: wrap; gap: 6px; padding-block: 8px; padding-inline: max(12px, env(safe-area-inset-left, 0px)) max(12px, env(safe-area-inset-right, 0px)); } .rb-g { gap: 4px; }
+  .room-bar .rb-g:nth-child(2) { order: 3; flex: 1 0 100%; justify-content: space-between; }
+  .room-bar .rb-g:nth-child(2) .rbtn { flex: 1; }
   .rbtn { min-width: 44px; } .rbtn span { display: none; }
-  .room-bar .btn .hide-sm { display: none !important; }
+  .room-bar .btn .hide-sm { display: inline !important; }      /* "나가기" 글자는 숨기지 않는다(아이콘이 없어 빈 단추가 된다) */
   .stage-note { position: static; margin-bottom: 6px; grid-column: 1 / -1; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -1121,8 +1129,10 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
     record_enabled: 1,
     record_audience: 'all',       // 새 녹화의 기본 공개 범위: all(수강생 공개) | staff(내부용)
     record_quality: 'standard',   // standard(720p) | light(480p)
-    record_keep_days: 0           // 0 이면 지우지 않는다
+    record_keep_days: 0,          // 0 이면 지우지 않는다
+    record_students: 'all'        // 학생 녹화: off(허용 안 함) | one(1:1 수업만) | all(모든 수업)
   };
+  const REC_OPEN_MAX = 6;         // 한 수업에서 동시에 녹화할 수 있는 학생 수 (진행자는 이 수에 들지 않는다)
   const REC_EXT = { 'video/webm': 'webm', 'video/mp4': 'mp4' };
 
   function createApi(deps) {
@@ -1175,7 +1185,7 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
         preview: !!env.preview,
         realtime: env.realtime !== false,
         translate: { on: !!s.translate_enabled, server: !!env.translate },
-        record: { on: !!recs && !!s.record_enabled, quality: s.record_quality === 'light' ? 'light' : 'standard' },
+        record: { on: !!recs && !!s.record_enabled, quality: s.record_quality === 'light' ? 'light' : 'standard', students: ['off', 'one'].indexOf(s.record_students) >= 0 ? s.record_students : 'all' },
         version: env.version || ''
       };
     }
@@ -1303,24 +1313,37 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
       if (isStaff(u)) v.viewers = V.count({ material_id: m.id });
       return v;
     }
-    // 녹화: 과정을 맡은 컨설턴트와 관리자는 모두 본다. 학생은 준비가 끝났고 수강생에게 공개된 것만 본다.
+    // 녹화: 과정을 맡은 컨설턴트와 관리자는 모두 본다. 학생은 자기가 녹화한 것과, 준비가 끝났고 수강생에게 공개된 것만 본다.
     const canManageRec = (r, u) => u.role === 'admin' || canManage(u, course(r.course_id));
+    const ownsRec = (r, u) => r.created_by === u.id && canSee(u, course(r.course_id));
+    const canEditRec = (r, u) => canManageRec(r, u) || ownsRec(r, u);      // 마감·이름 변경·삭제
     function recVisible(r, u) {
       if (!r) return false;
-      if (canManageRec(r, u)) return true;
+      if (canManageRec(r, u) || ownsRec(r, u)) return true;
       if (u.role !== 'student') return false;
       return r.status === 'ready' && r.audience !== 'staff' && canSee(u, course(r.course_id));
     }
+    // 이 수업을 녹화해도 되는지. 진행자는 언제나, 학생은 관리자 설정(record_students)에 따라.
+    function recordRight(u, s) {
+      const c = course(s.course_id);
+      if (!recs || !settings().record_enabled) return { ok: false, why: '녹화 기능이 꺼져 있습니다. 관리자 설정에서 켤 수 있습니다.' };
+      if (canManage(u, c)) return { ok: true, host: true };
+      if (u.role !== 'student' || !canSee(u, c)) return { ok: false, why: '이 수업을 녹화할 권한이 없습니다.' };
+      const mode = settings().record_students;
+      if (mode === 'off') return { ok: false, why: '학생 녹화는 꺼져 있습니다. 필요하면 컨설턴트에게 요청해 주세요.' };
+      if (mode === 'one' && c.kind !== 'one') return { ok: false, why: '학생 녹화는 1:1 수업에서만 할 수 있습니다.' };
+      return { ok: true, host: false };
+    }
     function recView(r, u) {
-      const c = course(r.course_id), s = sess(r.session_id), mine = canManageRec(r, u);
+      const c = course(r.course_id), s = sess(r.session_id), mine = canManageRec(r, u), by = userOf(r.created_by);
       const v = {
         id: r.id, session_id: r.session_id, course_id: r.course_id, title: r.title || '녹화', status: r.status,
         mime: r.mime || '', size: r.size || 0, duration_sec: r.duration_sec || 0, audience: r.audience === 'staff' ? 'staff' : 'all',
         started_at: r.started_at || r.created_at, ended_at: r.ended_at || null, created_at: r.created_at,
-        by: mini(userOf(r.created_by)),
+        by: mini(by), by_student: !!by && by.role === 'student', mine: r.created_by === u.id,
         session: s ? { id: s.id, title: s.title, starts_at: s.starts_at } : null,
         course: c ? { id: c.id, title: c.title, color: c.color || 'navy' } : null,
-        can_manage: mine
+        can_manage: mine, can_edit: canEditRec(r, u)
       };
       if (mine) { v.store = r.store || ''; v.note = r.error || ''; v.views = r.views || 0; }
       return v;
@@ -1453,10 +1476,12 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
       if (!canManage(x.user, course(s.course_id))) bad('이 수업을 관리할 권한이 없습니다.', 403);
       return s;
     }
-    function needRec(x, manage) {
+    // need: 'manage'(담당 컨설턴트·관리자) | 'edit'(녹화한 본인 포함) | 없음(볼 수 있으면 됨)
+    function needRec(x, need) {
       const r = RC.get(int(x.params.id));
       if (!recVisible(r, x.user)) bad('녹화를 찾을 수 없습니다.', 404);
-      if (manage && !canManageRec(r, x.user)) bad('이 녹화를 관리할 권한이 없습니다.', 403);
+      if (need === 'manage' && !canManageRec(r, x.user)) bad('이 녹화를 관리할 권한이 없습니다.', 403);
+      if (need === 'edit' && !canEditRec(r, x.user)) bad('이 녹화를 바꿀 권한이 없습니다.', 403);
       return r;
     }
 
@@ -1979,7 +2004,8 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
       const cfg = clientConfig();
       const room = {
         provider: s.provider, name: 'bl-' + s.id + '-' + s.room_key, mode: c.room_mode || 'mesh',
-        host: canManage(u, c), ice: env.ice || [], url: s.provider === 'link' ? s.external_url : ''
+        host: canManage(u, c), ice: env.ice || [], url: s.provider === 'link' ? s.external_url : '',
+        can_record: s.provider === 'builtin' && recordRight(u, s).ok
       };
       if (s.provider === 'jitsi') {
         const domain = cfg.jitsi_domain || 'meet.jit.si';
@@ -2100,31 +2126,43 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
     });
 
     // ================= 수업 녹화 =================
-    // 녹화는 진행자 브라우저가 만들어 조각으로 올린다(조각 받기와 파일 정리는 서버의 lib/recordings.js).
+    // 녹화는 녹화하는 사람의 브라우저가 만들어 조각으로 올린다(조각 받기와 파일 정리는 서버의 lib/recordings.js).
     // 여기서는 누가 녹화·열람·삭제할 수 있는지와 목록만 다룬다.
-    route('POST', '/sessions/:id/recordings', ['admin', 'consultant'], (x) => {
-      const s = needManagedSession(x), u = x.user, t = iso();
-      if (!recs || !settings().record_enabled) bad('녹화 기능이 꺼져 있습니다. 관리자 설정에서 켤 수 있습니다.', 403);
+    // 진행자뿐 아니라 학생도 자기 화면에 보이는 수업을 녹화할 수 있다(설정에 따라). 학생의 녹화는 본인과 담당 컨설턴트·관리자만 본다.
+    route('POST', '/sessions/:id/recordings', '*', (x) => {
+      const s = needSession(x), u = x.user, t = iso(), c = course(s.course_id);
+      if (!canSee(u, c)) bad('이 수업을 볼 권한이 없습니다.', 403);
+      const right = recordRight(u, s);
+      if (!right.ok) bad(right.why, 403);
       if (s.provider !== 'builtin') bad('내장 화상 수업만 이 화면에서 녹화할 수 있습니다.');
       if (s.status !== 'live') bad('진행 중인 수업만 녹화할 수 있습니다.');
       const mime = str(x.body.mime).toLowerCase().split(';')[0];
       if (!REC_EXT[mime]) bad('이 브라우저의 녹화 형식은 지원하지 않습니다. Chrome 또는 Edge 를 써 주세요.');
-      // 같은 수업에 열려 있는 녹화: 다른 사람이 방금까지 올리던 것이면 막고, 내 것이거나 끊긴 것이면 마감한다(새로고침 뒤 다시 시작한 경우).
+      // 같은 수업에 열려 있는 녹화: 내 것은 마감한다(새로고침 뒤 다시 시작한 경우). 다른 사람의 녹화는 그대로 둔다(각자 자기 화면을 녹화한다).
       const openOnes = RC.find({ session_id: s.id, status: 'recording' });
-      const other = openOnes.filter((r) => r.created_by !== u.id && ms(t) - ms(r.updated_at || r.started_at) < 60000)[0];
-      if (other) bad(((userOf(other.created_by) || {}).name || '다른 진행자') + ' 님이 이미 녹화하고 있습니다.', 409);
-      openOnes.forEach((r) => RC.update(r.id, env.preview ? { status: 'ready', ended_at: t, updated_at: t } : { status: 'processing', ended_at: t, updated_at: t }));
-      const n = RC.count({ session_id: s.id }) + 1;
+      if (!right.host) {
+        // 학생만 센다. 학생들이 자리를 다 차지해도 진행자는 언제나 녹화를 시작할 수 있다.
+        const others = openOnes.filter((r) => r.created_by !== u.id && (userOf(r.created_by) || {}).role === 'student' && ms(t) - ms(r.updated_at || r.started_at) < 60000);
+        if (others.length >= REC_OPEN_MAX) bad('이 수업은 이미 학생 ' + others.length + '명이 녹화하고 있어 더 시작할 수 없습니다.', 409);
+        // 학생 한 명이 쌓아 둘 수 있는 녹화 용량 (0 이면 제한 없음)
+        const quota = env.recStudentQuotaBytes || 0;
+        if (quota > 0) {
+          const used = RC.find({ created_by: u.id }).reduce((n, r) => n + (r.size || 0), 0);
+          if (used >= quota) bad('내 녹화 보관 용량(' + Math.round(quota / 1073741824) + 'GB)을 다 썼습니다. 지난 녹화를 지우거나 컨설턴트에게 요청해 주세요.', 409);
+        }
+      }
+      openOnes.filter((r) => r.created_by === u.id).forEach((r) => RC.update(r.id, env.preview ? { status: 'ready', ended_at: t, updated_at: t } : { status: 'processing', ended_at: t, updated_at: t }));
+      const n = RC.count({ session_id: s.id, created_by: u.id }) + 1;
       const row = RC.insert({
-        session_id: s.id, course_id: s.course_id, created_by: u.id, status: 'recording', title: s.title + (n > 1 ? ' (' + n + ')' : ''),
-        mime, ext: REC_EXT[mime], size: 0, duration_sec: 0, chunks: 0, audience: settings().record_audience === 'staff' ? 'staff' : 'all',
+        session_id: s.id, course_id: s.course_id, created_by: u.id, status: 'recording', title: s.title + (right.host ? '' : ' · ' + u.name) + (n > 1 ? ' (' + n + ')' : ''),
+        mime, ext: REC_EXT[mime], size: 0, duration_sec: 0, chunks: 0, audience: right.host && settings().record_audience !== 'staff' ? 'all' : 'staff',
         store: '', file_key: '', error: '', views: 0, started_at: t, updated_at: t, created_at: t
       });
       log(u, 'recording.start', 'session:' + s.id, s.title);
       return { recording: recView(row, u) };
     });
-    route('POST', '/recordings/:id/finish', ['admin', 'consultant'], (x) => {
-      const r = needRec(x, true), u = x.user, b = x.body;
+    route('POST', '/recordings/:id/finish', '*', (x) => {
+      const r = needRec(x, 'edit'), u = x.user, b = x.body;
       if (r.status !== 'recording') return { recording: recView(r, u) };
       const t = iso(), dur = Math.max(0, Math.min(24 * 3600, int(b.duration_sec, 0)));
       const patch = { ended_at: t, updated_at: t, duration_sec: dur, status: 'processing' };
@@ -2147,14 +2185,18 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
         notes: r.session_id ? N.find({ user_id: u.id, session_id: r.session_id }).sort((a, b) => cmp(a.created_at, b.created_at)).map((n) => noteView(n, u)) : []
       };
     });
-    route('PATCH', '/recordings/:id', ['admin', 'consultant'], (x) => {
-      const r = needRec(x, true), b = x.body, patch = {};
+    route('PATCH', '/recordings/:id', '*', (x) => {
+      const r = needRec(x, 'edit'), b = x.body, patch = {};
       if (b.title != null) { patch.title = str(b.title, 120); if (!patch.title) bad('녹화 이름을 입력해 주세요.'); }
-      if (b.audience != null) patch.audience = b.audience === 'staff' ? 'staff' : 'all';
+      if (b.audience != null) {
+        // 누구에게 보일지는 담당 컨설턴트와 관리자가 정한다 (다른 학생이 찍혀 있다)
+        if (!canManageRec(r, x.user)) bad('공개 범위는 컨설턴트와 관리자만 바꿀 수 있습니다.', 403);
+        patch.audience = b.audience === 'staff' ? 'staff' : 'all';
+      }
       return { recording: recView(RC.update(r.id, patch), x.user) };
     });
-    route('DELETE', '/recordings/:id', ['admin', 'consultant'], (x) => {
-      const r = needRec(x, true);
+    route('DELETE', '/recordings/:id', '*', (x) => {
+      const r = needRec(x, 'edit');
       if (recs) recs.remove(r);
       RC.remove(r.id);
       log(x.user, 'recording.delete', 'session:' + r.session_id, r.title);
@@ -2283,6 +2325,7 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
       if (b.record_enabled != null) next.record_enabled = flag(b.record_enabled);
       if (b.record_audience != null) next.record_audience = b.record_audience === 'staff' ? 'staff' : 'all';
       if (b.record_quality != null) next.record_quality = b.record_quality === 'light' ? 'light' : 'standard';
+      if (b.record_students != null) { if (['off', 'one', 'all'].indexOf(b.record_students) < 0) bad('학생 녹화 설정 값이 올바르지 않습니다.'); next.record_students = b.record_students; }
       if (b.record_keep_days != null) {
         const d = int(b.record_keep_days, -1);
         if (d < 0 || d > 3650) bad('녹화 보관 기간은 0일(계속 보관)에서 3650일 사이로 입력해 주세요.');
@@ -2333,17 +2376,22 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
       if (!u || !s) return null;
       const c = course(s.course_id);
       if (!canSee(u, c) || !joinState(s, u).ok) return null;
-      return { user: mini(u), room: 'bl-' + s.id + '-' + s.room_key, host: canManage(u, c), session_id: s.id };
+      return { user: mini(u), room: 'bl-' + s.id + '-' + s.room_key, host: canManage(u, c), session_id: s.id, canRecord: recordRight(u, s).ok };
     }
 
-    // 녹화 조각을 올려도 되는지 확인한다. 녹화를 시작한 본인만, 받는 중인 녹화에만 올릴 수 있다.
+    // 녹화 조각을 올려도 되는지 확인한다. 녹화를 시작한 본인만(진행자든 학생이든), 받는 중인 녹화에만 올릴 수 있다.
     function recUpload(token, id) {
       memo = { c: new Map(), u: new Map(), x: new Map(), s: null };
       const u = authUser(token);
       if (!u) return { status: 401, error: '로그인이 필요합니다.' };
       const r = RC.get(int(id));
-      if (!r || r.created_by !== u.id || !canManageRec(r, u)) return { status: 404, error: '녹화를 찾을 수 없습니다.' };
+      if (!r || r.created_by !== u.id || !canSee(u, course(r.course_id))) return { status: 404, error: '녹화를 찾을 수 없습니다.' };
       if (r.status !== 'recording') return { status: 410, error: '이미 마감된 녹화입니다.' };
+      const s = S.get(r.session_id);
+      const right = s ? recordRight(u, s) : { ok: false, why: '수업을 찾을 수 없습니다.' };
+      if (!right.ok) return { status: 403, error: right.why };
+      // 학생의 녹화는 하나의 크기도 따로 제한한다(진행자는 서버 전체 한도를 따른다)
+      if (!right.host && env.recStudentMaxBytes > 0 && (r.size || 0) >= env.recStudentMaxBytes) return { status: 413, error: '학생 녹화 하나의 최대 크기를 넘어 녹화를 멈췄습니다. 지금까지 녹화한 부분은 저장됩니다.' };
       return { status: 200, row: r };
     }
 
@@ -3227,11 +3275,11 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
     return html`<li class="row${ready ? '' : ' is-wait'}">
       <div class="row-when"><b class="num">${ready ? fmt.clock(r.duration_sec) : '--:--'}</b><span>${fmt.md(r.started_at)} ${fmt.time(r.started_at)}</span></div>
       <div class="row-main">${ready ? html`<a class="row-t" href="#/recordings/${r.id}">${r.title}</a>` : html`<span class="row-t">${r.title}</span>`}
-        <span class="row-s">${o.course && r.course ? html`${dot(r.course.color)}${r.course.title}<i class="sep"></i>` : ''}${o.session && r.session && r.session.title !== r.title ? html`<a href="#/sessions/${r.session.id}">${r.session.title}</a><i class="sep"></i>` : ''}${r.size ? html`${fmt.size(r.size)}<i class="sep"></i>` : ''}${r.by ? r.by.name : ''}${r.can_manage && r.views ? html`<i class="sep"></i>열람 ${r.views}` : ''}${r.can_manage && r.store === 's3' ? html`<i class="sep"></i>외부 저장소` : ''}${r.note ? html`<i class="sep"></i>${r.note}` : ''}</span></div>
+        <span class="row-s">${o.course && r.course ? html`${dot(r.course.color)}${r.course.title}<i class="sep"></i>` : ''}${o.session && r.session && r.session.title !== r.title ? html`<a href="#/sessions/${r.session.id}">${r.session.title}</a><i class="sep"></i>` : ''}${r.size ? html`${fmt.size(r.size)}<i class="sep"></i>` : ''}${r.mine ? '내가 녹화' : r.by ? r.by.name + (r.by_student && r.can_manage ? ' (학생)' : '') : ''}${r.can_manage && r.views ? html`<i class="sep"></i>열람 ${r.views}` : ''}${r.can_manage && r.store === 's3' ? html`<i class="sep"></i>외부 저장소` : ''}${r.note ? html`<i class="sep"></i>${r.note}` : ''}</span></div>
       <div class="row-end">${ready ? '' : html`<span class="st${r.status === 'failed' ? ' st-cancel' : r.status === 'recording' ? ' st-live' : ''}">${REC_STATE[r.status] || r.status}</span>`}
-        ${r.can_manage ? html`<select class="sel-sm" aria-label="${r.title} 공개 범위" data-change="rec.audience" data-id="${r.id}">${opt('all', '수강생 공개', r.audience)}${opt('staff', '내부용', r.audience)}</select>` : ''}
+        ${r.can_manage ? html`<select class="sel-sm" aria-label="${r.title} 공개 범위" data-change="rec.audience" data-id="${r.id}">${opt('all', '수강생 공개', r.audience)}${opt('staff', r.by_student ? '본인·강사만' : '내부용', r.audience)}</select>` : r.mine ? html`<span class="meta">${r.audience === 'all' ? '수강생 공개' : '나와 강사만'}</span>` : ''}
         ${ready ? html`<a class="btn btn-sm btn-go" href="#/recordings/${r.id}">보기</a>` : ''}
-        ${r.can_manage ? html`<button class="btn btn-sm" type="button" data-act="rec.delete" data-id="${r.id}" data-title="${r.title}">삭제</button>` : ''}</div>
+        ${r.can_edit ? html`<button class="btn btn-sm" type="button" data-act="rec.delete" data-id="${r.id}" data-title="${r.title}">삭제</button>` : ''}</div>
     </li>`;
   };
   P.recList = (list, o) => (list.length ? html`<ul class="rows">${list.map((r) => P.recRow(r, o))}</ul>` : html`<p class="none">${(o && o.none) || '녹화가 없습니다.'}</p>`);
@@ -3608,7 +3656,8 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
               ${s.homework ? html`<h3 class="sub">과제</h3><div class="prose">${nl2br(s.homework)}</div>` : ''}
               ${staff && s.staff_memo ? html`<h3 class="sub">내부 메모</h3><div class="prose">${nl2br(s.staff_memo)}</div>` : ''}`)}
           ${showRecs ? P.sec('녹화', html`<div id="rec-list">${P.recList(r.recordings, recOpt)}</div>
-              ${s.can_manage && r.recordings.length ? html`<p class="hint">"수강생 공개"인 녹화만 학생에게 보입니다. 학생은 화면에서 재생만 할 수 있고 파일로 내려받을 수 없습니다.</p>` : ''}`) : ''}
+              ${s.can_manage && r.recordings.length ? html`<p class="hint">"수강생 공개"인 녹화만 다른 학생에게 보입니다. 학생이 직접 녹화한 것은 그 학생과 컨설턴트·관리자만 봅니다. 학생은 화면에서 재생만 할 수 있고 파일로 내려받을 수 없습니다.</p>` : ''}
+              ${!staff && r.recordings.some((x) => x.mine) ? html`<p class="hint">내가 녹화한 수업은 나와 담당 컨설턴트만 볼 수 있습니다.</p>` : ''}`) : ''}
           ${staff ? P.sec('출석', r.attendance.length ? html`<div class="tbl-wrap"><table class="tbl"><thead><tr><th>이름</th><th>상태</th><th class="num">참여</th><th class="hide-sm">입장</th><th class="hide-sm">기록</th></tr></thead><tbody>
               ${r.attendance.map((a) => { const t = a.attendance; return html`<tr><td><a href="#/users/${a.user.id}">${a.user.name}</a></td>
                 <td>${s.can_manage ? html`<select class="sel-sm att-${t ? t.status : 'none'}" aria-label="${a.user.name} 출석 상태" data-change="att.set" data-session="${s.id}" data-user="${a.user.id}">${t ? '' : opt('', '기록 없음', '')}${['present', 'late', 'absent', 'excused'].map((k) => opt(k, LABEL.att[k], t ? t.status : ''))}</select>` : attChip(t && t.status)}</td>
@@ -3980,13 +4029,15 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
     App.header({
       title: rc.title, back,
       sub: (rc.course ? rc.course.title + ' · ' : '') + fmt.date(rc.started_at) + ' ' + fmt.time(rc.started_at) + ' · ' + fmt.clock(rc.duration_sec),
-      actions: rc.can_manage ? html`<button class="btn" type="button" data-act="rec.download" data-id="${rc.id}"><span>내려받기</span></button><button class="btn" type="button" data-act="rec.rename" data-id="${rc.id}" data-title="${rc.title}">이름 변경</button><button class="btn" type="button" data-act="rec.delete" data-id="${rc.id}" data-title="${rc.title}" data-back="${back}">삭제</button>` : ''
+      actions: html`${rc.can_manage ? html`<button class="btn" type="button" data-act="rec.download" data-id="${rc.id}">내려받기</button>` : ''}
+        ${rc.can_edit ? html`<button class="btn" type="button" data-act="rec.rename" data-id="${rc.id}" data-title="${rc.title}">이름 변경</button><button class="btn" type="button" data-act="rec.delete" data-id="${rc.id}" data-title="${rc.title}" data-back="${back}">삭제</button>` : ''}`
     });
     const noteOpt = { jump: true, none: '보고 있는 시각과 함께 메모가 저장됩니다.' };
     setHTML(ctx.el, html`<div class="viewer">
       <div class="vmain" id="vmain">${skeleton(8)}</div>
       <aside class="vside">
-        ${rc.can_manage ? html`<p class="vdesc">${rc.audience === 'staff' ? '내부용 녹화입니다. 학생에게는 보이지 않습니다.' : '수강생에게 공개된 녹화입니다.'}${rc.views ? ' 지금까지 ' + rc.views + '번 열렸습니다.' : ''}${rc.note ? ' ' + rc.note : ''}</p>` : ''}
+        ${rc.can_manage ? html`<p class="vdesc">${rc.by_student ? (rc.by ? rc.by.name : '학생') + ' 학생이 자기 화면을 녹화한 것입니다. ' : ''}${rc.audience === 'staff' ? (rc.by_student ? '그 학생과 컨설턴트·관리자만 봅니다.' : '내부용 녹화입니다. 학생에게는 보이지 않습니다.') : '수강생에게 공개된 녹화입니다.'}${rc.views ? ' 지금까지 ' + rc.views + '번 열렸습니다.' : ''}${rc.note ? ' ' + rc.note : ''}</p>`
+          : rc.mine ? html`<p class="vdesc">내가 녹화한 수업입니다. ${rc.audience === 'all' ? '컨설턴트가 수강생에게 공개했습니다.' : '나와 담당 컨설턴트만 볼 수 있습니다.'}</p>` : ''}
         <h2 class="vside-h">내 메모</h2>
         <div id="rec-notes">${P.noteList(r.notes, noteOpt)}</div>
         ${rc.session_id ? P.noteForm({ session: rc.session_id, refable: true, ref: '0:00' }) : ''}
@@ -4024,6 +4075,15 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
       v.addEventListener('durationchange', home);
       v.currentTime = 1e101;
     });
+  });
+  // 보관 장소 연결 시험: 작은 파일을 실제로 올리고·받고·지워 본다. 저장소 키를 넣은 직후에 누른다.
+  on('rec.storagetest', async () => {
+    const out = $('#rst-out');
+    out.hidden = false; out.textContent = '시험하는 중';
+    try {
+      const r = await API.post('/recordings/storage-test', {});
+      out.textContent = (r.ok ? '정상 · ' : '문제 있음 · ') + (r.store === 's3' ? '외부 저장소(' + r.bucket + ') ' : '서버 디스크 ') + r.message + (r.ok && r.ms ? ' (' + (r.ms / 1000).toFixed(1) + '초)' : '');
+    } catch (e) { out.textContent = '시험하지 못했습니다: ' + e.message; }
   });
   on('rec.download', async (d) => { const o = await API.post('/recordings/' + d.id + '/open', { download: 1 }); await Files.download(o.url, o.name); });
   on('rec.rename', async (d) => {
@@ -4304,7 +4364,8 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
       const opt2 = { session: true, course: true, none: '아직 녹화가 없습니다.' };
       body = html`
         ${u.low_disk ? html`<p class="banner banner-bad">${icon('alert', 16)}서버 디스크 여유 공간이 부족합니다. 진행 중인 녹화가 멈출 수 있습니다. 오래된 녹화를 지우거나 외부 저장소를 연결해 주세요.</p>` : ''}
-        <section class="sec"><header class="sec-h"><h2>보관 현황</h2></header><dl class="facts">
+        <section class="sec"><header class="sec-h"><h2>보관 현황</h2>${DEMO() ? '' : html`<button class="btn btn-sm" type="button" data-act="rec.storagetest">보관 장소 연결 시험</button>`}</header>
+        <p class="prose" id="rst-out" aria-live="polite" hidden></p><dl class="facts">
           <div><dt>보관 장소</dt><dd>${u.store === 's3' ? html`외부 저장소 <small>· ${u.bucket}</small>` : u.store === 'demo' ? html`브라우저 메모리 <small>· 미리보기</small>` : html`서버 디스크 <small>· DATA_DIR/recordings</small>`}</dd></div>
           <div><dt>녹화</dt><dd>${u.count || 0}개${u.seconds ? html` <small>· ${fmt.mins(u.seconds / 60)}</small>` : ''}${u.active ? html` <small>· 처리 중 ${u.active}</small>` : ''}</dd></div>
           <div><dt>전체 용량</dt><dd>${fmt.size(u.bytes) || '0MB'}${u.store === 's3' && u.local_bytes ? html` <small>· 그중 서버 디스크 ${fmt.size(u.local_bytes)}</small>` : ''}</dd></div>
@@ -4345,8 +4406,9 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
             ${field('용어집', html`<textarea id="st-trg" name="translate_glossary" rows="3" maxlength="3000" placeholder="연구계획서 = research proposal">${s.translate_glossary}</textarea>`, '한 줄에 하나씩 적습니다. 과정 이름이나 고유명사처럼 늘 같은 말로 옮겨야 하는 용어에 씁니다.')}
           </fieldset>
           ${e.recording ? html`<fieldset><legend>수업 녹화</legend>
-            <label class="check"><input id="st-rec" type="checkbox" name="record_enabled"${s.record_enabled ? raw(' checked') : ''}><span>내장 화상 수업에서 녹화 사용 <small>(진행자 강의실에 "녹화" 단추가 생깁니다. 녹화 중에는 모든 참가자 화면에 표시됩니다)</small></span></label>
+            <label class="check"><input id="st-rec" type="checkbox" name="record_enabled"${s.record_enabled ? raw(' checked') : ''}><span>내장 화상 수업에서 녹화 사용 <small>(강의실에 "녹화" 단추가 생깁니다. 녹화 중에는 모든 참가자 화면에 표시됩니다)</small></span></label>
             <div class="grid2">
+              ${field('학생 녹화', html`<select id="st-recs" name="record_students">${opt('all', '모든 수업에서 허용', s.record_students)}${opt('one', '1:1 수업에서만 허용', s.record_students)}${opt('off', '허용 안 함 (진행자만 녹화)', s.record_students)}</select>`, '학생이 자기 화면에 보이는 수업을 녹화합니다. 그 녹화는 본인과 담당 컨설턴트·관리자만 보고, 절약 화질로 저장됩니다.')}
               ${field('화질', html`<select id="st-recq" name="record_quality">${opt('standard', '표준 · 720p (1시간에 약 0.5GB)', s.record_quality)}${opt('light', '절약 · 480p (1시간에 약 0.3GB)', s.record_quality)}</select>`, '용량은 어림값입니다. 화면 움직임이 많으면 더 커집니다.')}
               ${field('새 녹화의 공개 범위', html`<select id="st-reca" name="record_audience">${opt('all', '수강생 공개', s.record_audience)}${opt('staff', '내부용 (컨설턴트·관리자만)', s.record_audience)}</select>`, '녹화마다 따로 바꿀 수 있습니다.')}
               ${field('보관 기간', html`<select id="st-reck" name="record_keep_days">${[[0, '계속 보관'], [30, '30일'], [90, '90일'], [180, '180일'], [365, '1년']].concat([0, 30, 90, 180, 365].indexOf(Number(s.record_keep_days)) < 0 ? [[s.record_keep_days, s.record_keep_days + '일']] : []).map((k) => opt(k[0], k[1], s.record_keep_days))}</select>`, '기간이 지난 녹화는 자동으로 지워지고 되돌릴 수 없습니다.')}
@@ -4697,7 +4759,7 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
     Object.assign(R, {
       active: false, sid: 0, session: null, info: null, room: null, me: null, ws: null, wsTry: 0, closing: false,
       peers: new Map(), local: { stream: null, audio: null, video: null, screen: null, mic: false, cam: false, hand: false, test: false, timer: null },
-      chat: [], unread: 0, side: '', pin: null, beat: null, clock: null, jitsi: null, sim: false, ended: false
+      chat: [], unread: 0, side: '', pin: null, beat: null, clock: null, jitsi: null, sim: false, ended: false, wake: null
     });
   }
   reset();
@@ -4815,12 +4877,25 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
     renderRoom();
     R.beat = setInterval(beat, 30000);
     R.clock = setInterval(tick, 1000); tick();
+    keepAwake();
     reloadNotes();
     if (r.room.provider === 'builtin') { if (R.sim) startSim(); else connect(); }
     else if (r.room.provider === 'jitsi') startJitsi();
     else setHTML($('#stage'), html`<div class="stage-card">${icon('ext', 32)}<h2>외부 화상회의로 진행합니다</h2><p>아래 버튼을 누르면 새 탭에서 회의가 열립니다. 이 화면을 열어 두면 메모와 자료를 함께 쓸 수 있습니다.</p><a class="btn btn-primary btn-lg" href="${r.room.url}" target="_blank" rel="noopener">${icon('ext', 18)}회의 열기</a><p class="url">${r.room.url}</p></div>`);
     if (L.error && r.room.provider === 'builtin' && !R.sim) toast(L.error, 'info', 7000);
   });
+  // 수업이 길어도 화면이 꺼지지 않게 한다(화면이 꺼지면 연결과 녹화가 끊긴다). 다른 창에 갔다 오면 다시 건다.
+  // 브라우저가 지원하지 않거나 거절하면 그냥 넘어간다.
+  async function keepAwake() {
+    if (!R.active || R.wake || !navigator.wakeLock || document.visibilityState !== 'visible') return;
+    try {
+      const lock = await navigator.wakeLock.request('screen');
+      if (!R.active) { lock.release().catch(() => {}); return; }
+      R.wake = lock;
+      lock.addEventListener('release', () => { if (R.wake === lock) R.wake = null; });
+    } catch (e) { /* 절전 모드 등으로 거절됨 */ }
+  }
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') keepAwake(); });
   async function beat() {
     if (!R.active) return;
     try {
@@ -4845,11 +4920,12 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
   // ---------------------------------------------------------------- 강의실 화면
   function renderRoom() {
     const s = R.session, builtin = R.room.provider === 'builtin', host = R.room.host;
-    const canRec = builtin && host && !!(App.state.config.record && App.state.config.record.on);
+    const canRec = builtin && !!R.room.can_record;      // 진행자, 그리고 설정이 허용하면 학생도
     setHTML(R_el(), html`<div class="room" id="room" data-side="">
       <header class="room-top">
         <div class="room-t"><b>${s.title}</b><span>${s.course.title} · <span id="room-clock"></span></span></div>
         <span class="rec-on" id="room-rec" role="status" hidden></span>
+        ${canRec ? html`<button class="rec-top only-sm" type="button" id="rt-rec" data-act="room.rec" aria-label="수업 녹화">녹화</button>` : ''}
         <span class="chip" id="room-state">대기 중</span>
         <span class="room-n" id="room-n">${icon('users', 14)}<b>1</b></span>
       </header>
@@ -5252,6 +5328,7 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
     if (R.jitsi) { try { R.jitsi.dispose(); } catch (e) { /* 이미 닫힘 */ } }
     App.tr.stop();
     stopLocal();
+    if (R.wake) { R.wake.release().catch(() => {}); R.wake = null; }
     R.active = false;
     if (!silent && sid) { App.closeLayers(); App.go('/sessions/' + sid, true); if (wasActive && !R.ended) toast('수업에서 나왔습니다.', 'info'); }
   }
@@ -5271,13 +5348,15 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
 ;
 /* public/js/record.js */
 /*
- * 내장 화상 수업 녹화. 진행자 브라우저가 만든다.
+ * 내장 화상 수업 녹화. 녹화하는 사람의 브라우저가 만든다(진행자든 학생이든 자기 화면에 보이는 수업을 녹화한다).
  *   1) 강의실에 보이는 참가자 화면을 캔버스 한 장에 모아 그리고, 모든 사람의 소리를 하나로 섞는다.
  *   2) 그 화면과 소리를 MediaRecorder 로 녹화해 4초 조각으로 자른다.
  *   3) 조각을 번호 순서대로 서버에 올린다. 연결이 잠깐 끊기면 다시 보낸다.
  *   4) 멈추면 서버가 파일을 정리해 수업 정보의 "녹화"에 올린다.
- * 영상이 서버를 거치지 않는 방식(참가자끼리 직접 연결)이라 녹화도 진행자 PC 가 맡는다.
- * 진행자가 탭을 닫으면 그때까지 올라간 부분만 남고, 서버가 몇 분 뒤 자동으로 마감한다.
+ * 영상이 서버를 거치지 않는 방식(참가자끼리 직접 연결)이라 녹화도 각자의 기기가 맡는다.
+ * 조각은 올라가는 대로 메모리에서 비우므로 수업이 길어져도 쌓이지 않는다(1시간 넘는 수업 기준으로 만들었다).
+ * 녹화하던 사람이 탭을 닫으면 그때까지 올라간 부분만 남고, 서버가 몇 분 뒤 자동으로 마감한다.
+ * 학생이 녹화한 것은 본인과 담당 컨설턴트·관리자만 본다. 학생과 휴대폰은 기기 부담을 줄이려고 절약 화질로 녹화한다.
  * 미리보기(서버 없음)에서는 같은 방식으로 녹화하되 영상을 브라우저 메모리에만 둔다.
  */
 (function (App) {
@@ -5290,30 +5369,43 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
   };
   const MIMES = ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm', 'video/mp4'];
   const SLICE_MS = 4000;
+  const PIECE = 4 * 1024 * 1024;     // 서버는 조각 하나를 8MB 까지만 받는다. 브라우저가 큰 덩어리를 한 번에 내놓으면(MP4 녹화) 잘라서 보낸다.
   const FONT = '"Noto Sans KR", "Malgun Gothic", sans-serif';
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const pad = (n) => String(n).padStart(2, '0');
   const clock = (sec) => (sec >= 3600 ? Math.floor(sec / 3600) + ':' : '') + pad(Math.floor(sec / 60) % 60) + ':' + pad(sec % 60);
 
-  const rec = (App.rec = { on: false, stopping: false, dead: false, id: 0, sid: 0, startedAt: 0, remote: null, queue: [], seq: 0, sent: 0, pumping: false, demo: null });
+  const QUEUE_MAX = 300;          // 올리지 못하고 쌓인 조각이 이만큼(약 20분)이면 멈춘다. 메모리가 계속 차는 것을 막는다.
+  const rec = (App.rec = { on: false, stopping: false, dead: false, id: 0, sid: 0, startedAt: 0, others: [], queue: [], seq: 0, sent: 0, pumping: false, demo: null });
 
   const pickMime = () => MIMES.filter((m) => { try { return window.MediaRecorder && MediaRecorder.isTypeSupported(m); } catch (e) { return false; } })[0] || '';
   rec.supported = () => !!(pickMime() && HTMLCanvasElement.prototype.captureStream && (window.AudioContext || window.webkitAudioContext));
+  const small = () => { try { return window.matchMedia('(max-width: 760px), (pointer: coarse)').matches; } catch (e) { return false; } };
+  const names = (list) => list.map((p) => p.name).join(', ');
 
   // ---------------------------------------------------------------- 표시
+  // 단추는 두 곳에 있다: 넓은 화면은 아래쪽 줄(#rb-rec), 좁은 화면은 위쪽 줄(#rt-rec).
   function paint() {
-    const tag = $('#room-rec'), btn = $('#rb-rec');
-    const mine = rec.on, other = !mine && rec.remote;
+    const tag = $('#room-rec'), btn = $('#rb-rec'), top = $('#rt-rec');
+    const mine = rec.on, others = rec.others;
+    const sec = mine ? Math.max(0, Math.floor((Date.now() - rec.startedAt) / 1000)) : 0;
     if (tag) {
-      tag.hidden = !(mine || other);
-      if (mine) setHTML(tag, html`<i></i>녹화 중 <b>${clock(Math.max(0, Math.floor((Date.now() - rec.startedAt) / 1000)))}</b>${rec.queue.length > 3 ? html`<small>전송이 밀리고 있습니다</small>` : ''}`);
-      else if (other) setHTML(tag, html`<i></i>녹화 중`);
-      tag.title = other ? rec.remote.name + ' 님이 녹화하고 있습니다' : '';
+      tag.hidden = !(mine || others.length);
+      tag.classList.toggle('is-mine', mine);
+      if (mine) setHTML(tag, html`<i></i>녹화 중 <b>${clock(sec)}</b>${rec.queue.length > 3 ? html`<small>전송이 밀리고 있습니다</small>` : ''}`);
+      else if (others.length) setHTML(tag, html`<i></i>녹화 중`);
+      tag.title = others.length ? names(others) + ' 님이 녹화하고 있습니다' : '';
     }
     if (btn) {
       btn.classList.toggle('is-rec', mine);
       btn.setAttribute('aria-pressed', String(mine));
       setHTML(btn, html`${icon(mine ? 'stop' : 'rec', 20)}<span>${mine ? (rec.stopping ? '저장 중' : '녹화 중지') : '녹화'}</span>`);
+    }
+    if (top) {
+      top.classList.toggle('is-rec', mine);
+      top.setAttribute('aria-pressed', String(mine));
+      top.setAttribute('aria-label', mine ? '녹화 중지' : '수업 녹화');
+      top.textContent = mine ? (rec.stopping ? '저장 중' : '중지 ' + clock(sec)) : '녹화';
     }
   }
   // 강의실 화면이 그려진 뒤 부른다.
@@ -5322,14 +5414,15 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
     rec.uiTimer = setInterval(paint, 1000);
     paint();
   };
-  // 다른 진행자의 녹화 시작·중지 알림, 그리고 입장할 때의 현재 상태
+  // 누가 녹화를 시작·중지했는지(나를 뺀 목록), 그리고 입장할 때의 현재 상태
   rec.onMessage = function (m) {
     const state = m.t === 'welcome' ? m.rec : m;
-    const was = !!rec.remote;
-    rec.remote = state && state.on && state.by ? { name: state.by.name, at: state.at } : null;
+    const me = App.room && App.room.me ? App.room.me.id : '';
+    const was = rec.others.length;
+    rec.others = ((state && state.list) || []).filter((p) => p.id !== me);
     if (m.t === 'welcome' && rec.on) App.room.send({ t: 'rec', on: true });      // 연결이 다시 붙었으면 표시도 다시 알린다
-    if (rec.remote && !was) toast('이 수업은 녹화되고 있습니다.', 'info', 6000);
-    else if (!rec.remote && was && m.t === 'rec') toast('녹화가 끝났습니다.', 'info');
+    if (rec.others.length > was) toast(names(rec.others) + ' 님이 이 수업을 녹화하고 있습니다.', 'info', 6000);
+    else if (!rec.others.length && was && m.t === 'rec' && !rec.on) toast('녹화가 끝났습니다.', 'info');
     paint();
   };
 
@@ -5459,7 +5552,9 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
 
   // 화면을 그리는 박자. 탭이 뒤로 가면 브라우저가 타이머를 늦추므로(화면 공유 중 흔한 상황) 워커에서 박자를 받는다.
   function startTicks(ms) {
-    const step = () => { if (!rec.canvas) return; draw(); if (++rec.frames % 15 === 0) syncAudio(); };
+    // 한 번 그릴 때마다 그 장면을 직접 한 장 찍는다(rec.shot). 브라우저가 알아서 찍게 두면 내부 타이머에 맞춰 찍느라
+    // PC 가 바쁘거나 탭이 뒤에 있을 때 장면을 빼먹는다.
+    const step = () => { if (!rec.canvas) return; draw(); if (rec.shot) rec.shot(); if (++rec.frames % 15 === 0) syncAudio(); };
     const plain = () => { rec.timer = setInterval(step, ms); };
     try {
       const src = 'var t=null;self.onmessage=function(e){clearInterval(t);if(e.data>0)t=setInterval(function(){self.postMessage(1)},e.data)}';
@@ -5480,7 +5575,7 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
     stopTicks();
     if (rec.stream) rec.stream.getTracks().forEach((t) => { try { t.stop(); } catch (e) { /* 이미 멈춤 */ } });
     if (rec.audio) { try { rec.audio.osc.stop(); rec.audio.ac.close(); } catch (e) { /* 이미 닫힘 */ } }
-    Object.assign(rec, { canvas: null, g: null, audio: null, stream: null, mr: null });
+    Object.assign(rec, { canvas: null, g: null, audio: null, stream: null, mr: null, shot: null });
   }
 
   // ---------------------------------------------------------------- 조각 올리기
@@ -5493,7 +5588,8 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
   // true: 서버가 받았다.  false: 더 보낼 수 없다(사유는 이미 알렸다).
   async function sendChunk(id, seq, blob) {
     if (rec.demo) { rec.demo.push(blob); return true; }
-    for (let attempt = 0; attempt < 9; attempt++) {
+    // 약 2분 40초 동안 다시 보낸다(서버 재시작이나 잠깐의 끊김을 넘긴다). 서버는 3분 동안 조각이 없으면 녹화를 마감한다.
+    for (let attempt = 0; attempt < 24; attempt++) {
       let res = null, body = {};
       try {
         res = await fetch('/api/recordings/' + id + '/chunk?seq=' + seq, { method: 'PUT', headers: { 'Content-Type': 'application/octet-stream', Authorization: 'Bearer ' + API.token }, body: blob });
@@ -5529,7 +5625,9 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
   // ---------------------------------------------------------------- 시작·중지
   rec.start = async function () {
     const R = App.room, cfg = App.state.config || {};
-    const q = QUALITY[(cfg.record || {}).quality] || QUALITY.standard, mime = pickMime();
+    // 학생과 휴대폰은 절약 화질로 녹화한다(기기 부담과 용량을 줄인다). 진행자 PC 는 관리자가 정한 화질을 따른다.
+    const q = !R.room.host || small() ? QUALITY.light : QUALITY[(cfg.record || {}).quality] || QUALITY.standard;
+    const mime = pickMime();
     const r = await API.post('/sessions/' + R.sid + '/recordings', { mime });
     Object.assign(rec, {
       id: r.recording.id, sid: R.sid, mime, queue: [], seq: 0, sent: 0, frames: 0, dead: false, demo: DEMO() ? [] : null,
@@ -5542,9 +5640,20 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
       rec.audio = buildAudio();
       if (rec.audio.ac.state === 'suspended') await rec.audio.ac.resume();
       syncAudio(); draw();
-      rec.stream = new MediaStream([rec.canvas.captureStream(q.fps).getVideoTracks()[0], rec.audio.dest.stream.getAudioTracks()[0]]);
+      // 장면은 우리가 그린 직후에 직접 찍는다(captureStream(0) + requestFrame). 지원하지 않는 브라우저는 초당 장수만 정해 맡긴다.
+      let vt = null;
+      try { vt = rec.canvas.captureStream(0).getVideoTracks()[0]; } catch (e) { vt = null; }
+      if (vt && typeof vt.requestFrame === 'function') rec.shot = () => { try { vt.requestFrame(); } catch (e) { /* 이번 장면은 건너뛴다 */ } };
+      else { if (vt) vt.stop(); vt = rec.canvas.captureStream(q.fps).getVideoTracks()[0]; rec.shot = null; }
+      rec.stream = new MediaStream([vt, rec.audio.dest.stream.getAudioTracks()[0]]);
+      if (rec.shot) rec.shot();
       const mr = new MediaRecorder(rec.stream, { mimeType: mime, videoBitsPerSecond: q.video, audioBitsPerSecond: q.audio });
-      mr.ondataavailable = (e) => { if (e.data && e.data.size && !rec.dead) { rec.queue.push(e.data); pump(); } };
+      mr.ondataavailable = (e) => {
+        if (!e.data || !e.data.size || rec.dead) return;
+        for (let o = 0; o < e.data.size; o += PIECE) rec.queue.push(e.data.size > PIECE ? e.data.slice(o, o + PIECE) : e.data);
+        if (!rec.stopping && rec.queue.length > QUEUE_MAX) { fatal('인터넷이 느려 녹화를 서버로 보내지 못하고 있어 멈췄습니다. 지금까지 올라간 부분은 저장됩니다.'); return; }
+        pump();
+      };
       mr.onerror = (e) => { console.error('[rec]', e.error || e); fatal('녹화 중 문제가 생겨 멈췄습니다. 지금까지 녹화한 부분은 저장됩니다.'); };
       rec.mr = mr;
       startTicks(Math.round(1000 / q.fps));
@@ -5556,7 +5665,7 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
       rec.id = 0;
       throw new App.ApiError(0, { error: '이 브라우저에서 녹화를 시작하지 못했습니다. Chrome 또는 Edge 최신 버전을 써 주세요.' });
     }
-    rec.on = true; rec.startedAt = Date.now();
+    rec.on = true; rec.startedAt = Date.now(); rec.host = !!R.room.host;
     R.send({ t: 'rec', on: true });
     paint();
     toast('녹화를 시작했습니다. 참가자 화면에 "녹화 중"이 표시됩니다.', 'ok', 4500);
@@ -5594,7 +5703,7 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
   // 강의실을 나갈 때: 녹화 중이면 멈추고, 남은 조각은 화면을 옮긴 뒤에도 계속 올린다.
   rec.leave = function () {
     clearInterval(rec.uiTimer);
-    rec.remote = null;
+    rec.others = [];
     if (rec.on) rec.stop('leave');
   };
 
@@ -5606,9 +5715,12 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
       return;
     }
     if (!rec.supported()) { toast('이 브라우저에서는 녹화를 쓸 수 없습니다. Chrome 또는 Edge 를 써 주세요.', 'bad', 6000); return; }
-    if (rec.remote) { toast(rec.remote.name + ' 님이 이미 녹화하고 있습니다.', 'info'); return; }
     if (R.session.status !== 'live') { toast('수업이 시작된 뒤에 녹화할 수 있습니다.', 'info'); return; }
-    if (!(await ask({ title: '수업 녹화', message: '이 수업을 녹화할까요?', detail: '참가자 모두의 화면에 "녹화 중"이 표시됩니다. 녹화하는 동안 이 탭을 닫지 마세요. 녹화본은 수업 정보의 "녹화"에서 다시 볼 수 있습니다.', yes: '녹화 시작' }))) return;
+    const also = rec.others.length ? names(rec.others) + ' 님도 녹화하고 있습니다. 내 화면은 따로 녹화됩니다. ' : '';
+    const detail = R.room.host
+      ? also + '참가자 모두의 화면에 "녹화 중"이 표시됩니다. 녹화하는 동안 이 탭을 닫지 마세요. 녹화본은 수업 정보의 "녹화"에서 다시 볼 수 있습니다.'
+      : also + '내 화면에 보이는 수업이 녹화되고, 참가자 모두의 화면에 "녹화 중"이 표시됩니다. 녹화본은 나와 담당 컨설턴트만 볼 수 있습니다. 녹화하는 동안 이 화면을 닫지 마세요.';
+    if (!(await ask({ title: '수업 녹화', message: '이 수업을 녹화할까요?', detail, yes: '녹화 시작' }))) return;
     await rec.start();
   });
 
@@ -5656,4 +5768,4 @@ a.row-t:hover { text-decoration: underline; text-underline-offset: 3px; }
 </script>
 </body>
 </html>
-<!-- build ce0078adb6c1 -->
+<!-- build 6d6adc38068c -->
